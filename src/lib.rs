@@ -63,15 +63,15 @@ mod user;
 mod user_stats;
 mod utils;
 
-pub type SResult<T> = Result<T, SteamError>;
+/// Alias for [`Result<T, SteamError>`](SteamError)
+pub type SteamResult<T = ()> = Result<T, SteamError>;
 
-pub type SIResult<T> = Result<T, SteamAPIInitError>;
-
-pub(crate) fn to_steam_result(result: sys::EResult) -> SResult<()> {
-    if result == sys::EResult::k_EResultOK {
-        Ok(())
-    } else {
-        Err(result.into())
+/// Convert a raw result to a Rust [`Result`] type.
+pub(crate) fn to_steam_result(result: sys::EResult) -> SteamResult {
+    match result {
+        // sys::EResult::k_EResultNone => Ok(()), TODO: I'm not sure if this is considered a success
+        sys::EResult::k_EResultOK => Ok(()),
+        error => Err(error.try_into().unwrap()),
     }
 }
 
@@ -116,7 +116,7 @@ impl Inner {
     /// thread.
     ///
     /// This should be called frequently (e.g. once per a frame)
-    /// in order to reduce the latency between recieving events.
+    /// in order to reduce the latency between receiving events.
     pub fn run_callbacks(&self) {
         self.run_callbacks_raw(|cb_discrim, data| {
             let mut callbacks = self.callbacks.callbacks.lock().unwrap();
@@ -132,10 +132,10 @@ impl Inner {
     /// `callback_handler` is called for every callback invoked.
     ///
     /// This option provides an alternative for handling callbacks that
-    /// can doesn't require the handler to be `Send`, and `'static`.
+    /// don't require the handler to be `Send`, and `'static`.
     ///
     /// This should be called frequently (e.g. once per a frame)
-    /// in order to reduce the latency between recieving events.
+    /// in order to reduce the latency between receiving events.
     pub fn process_callbacks(&self, mut callback_handler: impl FnMut(CallbackResult)) {
         self.run_callbacks_raw(|cb_discrim, data| {
             {
@@ -198,7 +198,8 @@ struct NetworkingSocketsData {
         ),
     >,
     /// Connections to a remote listening port
-    independent_connections: HashMap<sys::HSteamNetConnection, Sender<()>>,
+    independent_connections:
+        HashMap<sys::HSteamNetConnection, Sender<networking_types::NetConnectionEvent>>,
     connection_callback: Weak<CallbackHandle>,
 }
 
@@ -245,7 +246,7 @@ impl Client {
     /// * The game isn't running on the same user/level as the steam client
     /// * The user doesn't own a license for the game.
     /// * The app ID isn't completely set up.
-    pub fn init() -> SIResult<Client> {
+    pub fn init() -> Result<Client, SteamAPIInitError> {
         static_assert_send::<Client>();
         static_assert_sync::<Client>();
         unsafe {
@@ -286,7 +287,7 @@ impl Client {
     /// * The game isn't running on the same user/level as the steam client
     /// * The user doesn't own a license for the game.
     /// * The app ID isn't completely set up.
-    pub fn init_app<ID: Into<AppId>>(app_id: ID) -> SIResult<Client> {
+    pub fn init_app<ID: Into<AppId>>(app_id: ID) -> Result<Client, SteamAPIInitError> {
         let app_id = app_id.into().0.to_string();
         std::env::set_var("SteamAppId", &app_id);
         std::env::set_var("SteamGameId", app_id);
@@ -391,7 +392,7 @@ impl Client {
     /// Returns an accessor to the steam apps interface
     pub fn apps(&self) -> Apps {
         unsafe {
-            let apps = sys::SteamAPI_SteamApps_v008();
+            let apps = sys::SteamAPI_SteamApps_v009();
             debug_assert!(!apps.is_null());
             Apps {
                 apps: apps,
@@ -451,7 +452,7 @@ impl Client {
     /// Returns an accessor to the steam remote play interface
     pub fn remote_play(&self) -> RemotePlay {
         unsafe {
-            let rp = sys::SteamAPI_SteamRemotePlay_v003();
+            let rp = sys::SteamAPI_SteamRemotePlay_v004();
             debug_assert!(!rp.is_null());
             RemotePlay {
                 rp,
@@ -616,12 +617,97 @@ impl SteamId {
         }
     }
 
+    /// Returns the Steam universe this Steam ID is part of.
+    pub fn universe(&self) -> Universe {
+        let bits = sys::CSteamID_SteamID_t {
+            m_unAll64Bits: self.0,
+        };
+        match unsafe { bits.m_comp }.m_EUniverse() {
+            sys::EUniverse::k_EUniversePublic => Universe::Public,
+            sys::EUniverse::k_EUniverseBeta => Universe::Beta,
+            sys::EUniverse::k_EUniverseInternal => Universe::Internal,
+            sys::EUniverse::k_EUniverseDev => Universe::Dev,
+            _ => Universe::Invalid,
+        }
+    }
+
+    pub fn account_type(&self) -> AccountType {
+        let bits = sys::CSteamID_SteamID_t {
+            m_unAll64Bits: self.0,
+        };
+        match unsafe { bits.m_comp }.m_EAccountType() {
+            x if x == sys::EAccountType::k_EAccountTypeIndividual as u32 => AccountType::Individual,
+            x if x == sys::EAccountType::k_EAccountTypeMultiseat as u32 => AccountType::Multiseat,
+            x if x == sys::EAccountType::k_EAccountTypeGameServer as u32 => AccountType::GameServer,
+            x if x == sys::EAccountType::k_EAccountTypeAnonGameServer as u32 => {
+                AccountType::AnonGameServer
+            }
+            x if x == sys::EAccountType::k_EAccountTypePending as u32 => AccountType::Pending,
+            x if x == sys::EAccountType::k_EAccountTypeContentServer as u32 => {
+                AccountType::ContentServer
+            }
+            x if x == sys::EAccountType::k_EAccountTypeClan as u32 => AccountType::Clan,
+            x if x == sys::EAccountType::k_EAccountTypeChat as u32 => AccountType::Chat,
+            x if x == sys::EAccountType::k_EAccountTypeConsoleUser as u32 => {
+                AccountType::ConsoleUser
+            }
+            x if x == sys::EAccountType::k_EAccountTypeAnonUser as u32 => AccountType::AnonUser,
+            _ => AccountType::Invalid,
+        }
+    }
+
     /// Returns the formatted SteamID32 string for this steam id.
     pub fn steamid32(&self) -> String {
         let account_id = self.account_id().raw();
         let last_bit = account_id & 1;
         format!("STEAM_0:{}:{}", last_bit, (account_id >> 1))
     }
+}
+
+/// Steam universes.
+///
+/// Each universe is a self-contained Steam instance.
+#[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[repr(u32)]
+pub enum Universe {
+    Invalid = 0,
+    Public = 1,
+    Beta = 2,
+    Internal = 3,
+    Dev = 4,
+}
+
+/// Steam account types.
+///
+/// [`SteamId`]s are used to identify many different types of entities within Steam.
+/// This type represents the type of account associated with a Steam ID.
+#[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[repr(u32)]
+pub enum AccountType {
+    /// Invalid user account type.
+    Invalid = 0,
+    /// Individual user account.
+    Individual = 1,
+    /// Multiseat (e.g. cybercafe) account.
+    Multiseat = 2,
+    /// Game server account with a fixed Steam ID.
+    GameServer = 3,
+    /// Anonymous game server account.
+    AnonGameServer = 4,
+    /// Pending account.
+    Pending = 5,
+    /// Identifies a Steam content server.
+    ContentServer = 6,
+    /// Identifies a Steam clan.
+    Clan = 7,
+    /// Identifies a Steam chat.
+    Chat = 8,
+    /// Fake SteamID for local PSN account on PS3 or Live account on 360, etc.
+    ConsoleUser = 9,
+    /// Anoynmous user account.
+    AnonUser = 10,
 }
 
 /// A user's account id
@@ -652,7 +738,7 @@ impl AccountId {
 /// Combines `AppId` and other information
 #[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct GameId(pub(crate) u64);
+pub struct GameId(#[cfg_attr(feature = "serde", serde(rename = "game_id"))] pub(crate) u64);
 
 impl GameId {
     /// Creates a `GameId` from a raw 64 bit value.

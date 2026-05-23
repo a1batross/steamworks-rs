@@ -48,7 +48,7 @@ impl LobbyId {
 impl Matchmaking {
     pub fn request_lobby_list<F>(&self, cb: F)
     where
-        F: FnOnce(SResult<Vec<LobbyId>>) + 'static + Send,
+        F: FnOnce(SteamResult<Vec<LobbyId>>) + 'static + Send,
     {
         unsafe {
             let api_call = sys::SteamAPI_ISteamMatchmaking_RequestLobbyList(self.mm);
@@ -85,7 +85,7 @@ impl Matchmaking {
     /// * `LobbyCreated`
     pub fn create_lobby<F>(&self, ty: LobbyType, max_members: u32, cb: F)
     where
-        F: FnOnce(SResult<LobbyId>) + 'static + Send,
+        F: FnOnce(SteamResult<LobbyId>) + 'static + Send,
     {
         assert!(max_members <= 250); // Steam API limits
         unsafe {
@@ -132,6 +132,19 @@ impl Matchmaking {
         }
     }
 
+    /// Refreshes all of the metadata for a lobby that you're not in.
+    ///
+    /// You never need to call this for lobbies you're a member of, that data
+    /// will always be up to date. This will send down all of the metadata for
+    /// the lobby, overwriting local data.
+    ///
+    /// # Triggers
+    ///
+    /// * `LobbyDataUpdate`
+    pub fn request_lobby_data(&self, lobby: LobbyId) -> bool {
+        unsafe { sys::SteamAPI_ISteamMatchmaking_RequestLobbyData(self.mm, lobby.0) }
+    }
+
     /// Returns the number of data keys in the lobby
     pub fn lobby_data_count(&self, lobby: LobbyId) -> u32 {
         unsafe { sys::SteamAPI_ISteamMatchmaking_GetLobbyDataCount(self.mm, lobby.0) as _ }
@@ -153,8 +166,8 @@ impl Matchmaking {
 
     /// Returns the lobby metadata associated with the specified index
     pub fn lobby_data_by_index(&self, lobby: LobbyId, idx: u32) -> Option<(String, String)> {
-        let mut key = [0i8; sys::k_nMaxLobbyKeyLength as usize];
-        let mut value = [0i8; sys::k_cubChatMetadataMax as usize];
+        let mut key = [0 as c_char; sys::k_nMaxLobbyKeyLength as usize];
+        let mut value = [0 as c_char; sys::k_cubChatMetadataMax as usize];
         unsafe {
             let success = sys::SteamAPI_ISteamMatchmaking_GetLobbyDataByIndex(
                 self.mm,
@@ -1125,7 +1138,7 @@ impl_callback!(cb: LobbyChatUpdate_t => LobbyChatUpdate {
     Self {
         lobby: LobbyId(cb.m_ulSteamIDLobby),
         user_changed: SteamId(cb.m_ulSteamIDUserChanged),
-        making_change: SteamId(cb.m_ulSteamIDUserChanged),
+        making_change: SteamId(cb.m_ulSteamIDMakingChange),
         member_state_change: match cb.m_rgfChatMemberStateChange {
             x if x == sys::EChatMemberStateChange::k_EChatMemberStateChangeEntered as u32 => {
                 ChatMemberStateChange::Entered
@@ -1153,15 +1166,15 @@ impl_callback!(cb: LobbyChatUpdate_t => LobbyChatUpdate {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct LobbyCreated {
-    /// The result of the operation (EResult). Possible values: k_EResultOK, k_EResultFail, k_EResultTimeout, k_EResultLimitExceeded, k_EResultAccessDenied, k_EResultNoConnection
-    pub result: u32,
+    /// The result of the operation
+    pub result: SteamResult,
     /// The Steam ID of the lobby that was created, 0 if failed.
     pub lobby: LobbyId,
 }
 
 impl_callback!(cb: LobbyCreated_t => LobbyCreated {
     Self {
-        result: cb.m_eResult as u32,
+        result: to_steam_result(cb.m_eResult),
         lobby: LobbyId(cb.m_ulSteamIDLobby),
     }
 });

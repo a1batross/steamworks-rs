@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::networking_sockets::{InnerSocket, NetConnection};
 use crate::networking_types::NetConnectionError::UnhandledType;
-use crate::{Callback, Inner, SResult, SteamId};
+use crate::{Callback, Inner, SteamId, SteamResult};
 use std::convert::{TryFrom, TryInto};
 use std::ffi::{c_void, CString};
 use std::fmt::{Debug, Display, Formatter};
@@ -1107,7 +1107,13 @@ impl TryFrom<sys::ESteamNetworkingAvailability> for NetworkingAvailability {
 #[error("integer value could not be converted to enum")]
 pub struct InvalidEnumValue;
 
-/// Internal struct to handle network callbacks
+/// Struct to get info about this specific connection.
+///
+/// Things you might want to get:
+/// * Identity (SteamID or IP Address)
+/// * Connection State: connecting, ongoing, disconnected by peer, ...
+/// * End Reason if there is one
+/// * Custom User Data, as an i64
 #[derive(Clone)]
 pub struct NetConnectionInfo {
     pub(crate) inner: sys::SteamNetConnectionInfo_t,
@@ -1491,6 +1497,12 @@ pub enum ListenSocketEvent {
     Disconnected(DisconnectedEvent),
 }
 
+#[derive(Debug)]
+pub struct NetConnectionEvent {
+    pub new_state: NetworkingConnectionState,
+    pub old_state: NetworkingConnectionState,
+}
+
 pub struct ConnectionRequest {
     remote: NetworkingIdentity,
     user_data: i64,
@@ -1506,7 +1518,7 @@ impl ConnectionRequest {
         self.user_data
     }
 
-    pub fn accept(self) -> SResult<()> {
+    pub fn accept(self) -> SteamResult {
         self.connection.accept()
     }
 
@@ -1772,6 +1784,12 @@ impl NetworkingIdentity {
         }
     }
 
+    pub fn is_equal_to(&self, other: &Self) -> bool {
+        unsafe {
+            sys::SteamAPI_SteamNetworkingIdentity_IsEqualTo(self.as_ptr() as *mut _, other.as_ptr())
+        }
+    }
+
     pub(crate) fn as_ptr(&self) -> *const sys::SteamNetworkingIdentity {
         &self.inner
     }
@@ -1780,6 +1798,14 @@ impl NetworkingIdentity {
         &mut self.inner
     }
 }
+
+impl PartialEq for NetworkingIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.is_equal_to(other)
+    }
+}
+
+impl Eq for NetworkingIdentity {}
 
 impl Debug for NetworkingIdentity {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

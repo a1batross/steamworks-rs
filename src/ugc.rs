@@ -174,6 +174,7 @@ pub enum FileType {
     SteamworksAccessInvite,
     SteamVideo,
     GameManagedItem,
+    Clip,
 }
 
 impl Into<sys::EWorkshopFileType> for FileType {
@@ -201,6 +202,7 @@ impl Into<sys::EWorkshopFileType> for FileType {
             }
             FileType::SteamVideo => sys::EWorkshopFileType::k_EWorkshopFileTypeSteamVideo,
             FileType::GameManagedItem => sys::EWorkshopFileType::k_EWorkshopFileTypeGameManagedItem,
+            FileType::Clip => sys::EWorkshopFileType::k_EWorkshopFileTypeClip,
         }
     }
 }
@@ -229,6 +231,7 @@ impl From<sys::EWorkshopFileType> for FileType {
             }
             sys::EWorkshopFileType::k_EWorkshopFileTypeSteamVideo => FileType::SteamVideo,
             sys::EWorkshopFileType::k_EWorkshopFileTypeGameManagedItem => FileType::GameManagedItem,
+            sys::EWorkshopFileType::k_EWorkshopFileTypeClip => FileType::Clip,
             _ => unreachable!(),
         }
     }
@@ -493,10 +496,21 @@ impl_callback!(cb: DownloadItemResult_t => DownloadItemResult {
     Self {
         app_id: AppId(cb.m_unAppID),
         published_file_id: PublishedFileId(cb.m_nPublishedFileId),
-        error: match cb.m_eResult {
-            sys::EResult::k_EResultOK => None,
-            error => Some(error.into()),
-        },
+        error: to_steam_result(cb.m_eResult).err(),
+    }
+});
+
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+pub struct DeleteItemResult {
+    pub published_file_id: PublishedFileId,
+    pub error: Option<SteamError>,
+}
+
+impl_callback!(cb: DeleteItemResult_t => DeleteItemResult {
+    Self {
+        published_file_id: PublishedFileId(cb.m_nPublishedFileId),
+        error: to_steam_result(cb.m_eResult).err(),
     }
 });
 
@@ -792,16 +806,91 @@ impl UGC {
     {
         unsafe {
             let api_call = sys::SteamAPI_ISteamUGC_DeleteItem(self.ugc, published_file_id.0);
-            register_call_result::<sys::DownloadItemResult_t, _>(
+            register_call_result::<sys::DeleteItemResult_t, _>(
                 &self.inner,
                 api_call,
                 move |v, io_error| {
                     cb(if io_error {
                         Err(SteamError::IOFailure)
-                    } else if v.m_eResult != sys::EResult::k_EResultNone
-                        && v.m_eResult != sys::EResult::k_EResultOK
-                    {
-                        Err(v.m_eResult.into())
+                    } else if let Err(error) = to_steam_result(v.m_eResult) {
+                        Err(error)
+                    } else {
+                        Ok(())
+                    })
+                },
+            );
+        }
+    }
+
+    /// Start tracking playtime on a set of workshop items.
+    pub fn start_playtime_tracking<F>(&self, published_file_ids: &[PublishedFileId], cb: F)
+    where
+        F: FnOnce(Result<(), SteamError>) + 'static + Send,
+    {
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUGC_StartPlaytimeTracking(
+                self.ugc,
+                published_file_ids.as_ptr() as *mut u64,
+                published_file_ids.len() as u32,
+            );
+            register_call_result::<sys::StartPlaytimeTrackingResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else if let Err(error) = to_steam_result(v.m_eResult) {
+                        Err(error)
+                    } else {
+                        Ok(())
+                    })
+                },
+            );
+        }
+    }
+
+    /// Stop tracking playtime on a set of workshop items.
+    pub fn stop_playtime_tracking<F>(&self, published_file_ids: &[PublishedFileId], cb: F)
+    where
+        F: FnOnce(Result<(), SteamError>) + 'static + Send,
+    {
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUGC_StopPlaytimeTracking(
+                self.ugc,
+                published_file_ids.as_ptr() as *mut u64,
+                published_file_ids.len() as u32,
+            );
+            register_call_result::<sys::StopPlaytimeTrackingResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else if let Err(error) = to_steam_result(v.m_eResult) {
+                        Err(error)
+                    } else {
+                        Ok(())
+                    })
+                },
+            );
+        }
+    }
+
+    /// Stop tracking playtime of all workshop items.
+    pub fn stop_playtime_tracking_for_all_items<F>(&self, cb: F)
+    where
+        F: FnOnce(Result<(), SteamError>) + 'static + Send,
+    {
+        unsafe {
+            let api_call = sys::SteamAPI_ISteamUGC_StopPlaytimeTrackingForAllItems(self.ugc);
+            register_call_result::<sys::StopPlaytimeTrackingResult_t, _>(
+                &self.inner,
+                api_call,
+                move |v, io_error| {
+                    cb(if io_error {
+                        Err(SteamError::IOFailure)
+                    } else if let Err(error) = to_steam_result(v.m_eResult) {
+                        Err(error)
                     } else {
                         Ok(())
                     })
@@ -861,6 +950,19 @@ impl UpdateHandle {
                 self.ugc,
                 self.handle,
                 description.as_ptr()
+            ));
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn language(self, language: &str) -> Self {
+        unsafe {
+            let language = CString::new(language).unwrap();
+            assert!(sys::SteamAPI_ISteamUGC_SetItemUpdateLanguage(
+                self.ugc,
+                self.handle,
+                language.as_ptr()
             ));
         }
         self
@@ -1004,13 +1106,13 @@ impl UpdateHandle {
                 move |v, io_error| {
                     cb(if io_error {
                         Err(SteamError::IOFailure)
-                    } else if v.m_eResult != sys::EResult::k_EResultOK {
-                        Err(v.m_eResult.into())
                     } else {
-                        Ok((
-                            PublishedFileId(v.m_nPublishedFileId),
-                            v.m_bUserNeedsToAcceptWorkshopLegalAgreement,
-                        ))
+                        to_steam_result(v.m_eResult).map(|()| {
+                            (
+                                PublishedFileId(v.m_nPublishedFileId),
+                                v.m_bUserNeedsToAcceptWorkshopLegalAgreement,
+                            )
+                        })
                     })
                 },
             );
@@ -1428,9 +1530,9 @@ impl QueryHandle {
                         sys::SteamAPI_ISteamUGC_ReleaseQueryUGCRequest(ugc, handle);
                         cb(Err(SteamError::IOFailure));
                         return;
-                    } else if v.m_eResult != sys::EResult::k_EResultOK {
+                    } else if let Err(error) = to_steam_result(v.m_eResult) {
                         sys::SteamAPI_ISteamUGC_ReleaseQueryUGCRequest(ugc, handle);
-                        cb(Err(v.m_eResult.into()));
+                        cb(Err(error));
                         return;
                     }
 
@@ -1597,7 +1699,7 @@ impl<'a> QueryResults<'a> {
             );
             debug_assert!(ok);
 
-            if raw_details.m_eResult != sys::EResult::k_EResultOK {
+            if to_steam_result(raw_details.m_eResult).is_err() {
                 return None;
             }
 
